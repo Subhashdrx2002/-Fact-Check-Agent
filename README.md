@@ -1,5 +1,5 @@
 # The Fact-Check Agent
-Emergent-Fullstack-App.png
+![Project Image](https://github.com/username/repo/blob/main/image.png)
 
 A web app that reads a PDF, extracts specific checkable claims (statistics,
 dates, financial and technical figures), searches the live web for each
