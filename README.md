@@ -1,5 +1,9 @@
 # The Fact-Check Agent
-![Project Image](![Project Image](https://github.com/Subhashdrx2002/-Fact-Check-Agent/blob/main/Fact-Check-Agent-%C2%B7-Truth-Layer-for-PDFs.png))
+![Project Image](https://github.com/Subhashdrx2002/-Fact-Check-Agent/blob/main/Fact-Check-Agent-%C2%B7-Truth-Layer-for-PDFs.png)
+
+![Project Image](https://github.com/Subhashdrx2002/-Fact-Check-Agent/blob/main/Fact-Check-Agent-%C2%B7-Truth-Layer-for-PDFs.png)
+
+![Project Image](https://github.com/Subhashdrx2002/-Fact-Check-Agent/blob/main/Fact-Check-Agent-%C2%B7-Truth-Layer-for-PDFs.png)
 
 A web app that reads a PDF, extracts specific checkable claims (statistics,
 dates, financial and technical figures), searches the live web for each
