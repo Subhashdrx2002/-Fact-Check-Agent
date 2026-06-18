@@ -1,0 +1,103 @@
+"""
+claim_extractor.py
+Uses Claude to read the document text and pull out specific,
+checkable factual claims (statistics, dates, financial figures,
+technical figures) along with the surrounding context.
+"""
+
+import json
+import re
+from pdf_utils import chunk_text
+
+EXTRACTION_SYSTEM_PROMPT = """You are a meticulous fact-checking analyst. \
+Your only job is to read marketing or business content and pull out claims \
+that are SPECIFIC and CHECKABLE against real-world, public information.
+
+A checkable claim contains at least one of:
+- a number (percentage, statistic, ranking, count, score)
+- a date or year
+- a financial figure (revenue, funding, market size, price)
+- a technical figure (speed, accuracy, parameters, version number, benchmark score)
+- a named-entity fact ("X acquired Y in 2021", "X has 200 million users")
+
+Do NOT extract:
+- vague marketing language with no concrete number/date/fact ("we are the best", "trusted by many")
+- opinions or subjective claims
+- generic statements with nothing to verify
+
+Return ONLY a JSON array, nothing else. No markdown fences, no preamble, no explanation.
+Each item must have exactly these keys:
+- "claim": the claim restated as one self-contained, unambiguous sentence (resolve pronouns,
+  add the subject if missing, so it can be verified without the surrounding text)
+- "original_text": the exact sentence/snippet from the document the claim came from
+- "type": one of "statistic", "date", "financial", "technical", "other"
+
+If there are no checkable claims, return an empty JSON array: []
+"""
+
+
+def _safe_json_parse(raw: str):
+    """Strips markdown fences and parses JSON, tolerating minor formatting issues."""
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^```(json)?", "", cleaned).strip()
+    cleaned = re.sub(r"```$", "", cleaned).strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Try to recover the largest [...] block in the text
+        match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+
+def extract_claims(client, text: str, model: str) -> list[dict]:
+    """
+    Sends document text to Claude and returns a list of structured claims.
+
+    Args:
+        client: An anthropic.Anthropic client instance.
+        text: Full document text extracted from the PDF.
+        model: Claude model id to use.
+
+    Returns:
+        List of dicts: [{"claim", "original_text", "type"}, ...]
+    """
+    all_claims = []
+
+    for chunk in chunk_text(text):
+        response = client.messages.create(
+            model=model,
+            max_tokens=2000,
+            system=EXTRACTION_SYSTEM_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Document text:\n\n{chunk}\n\nExtract the checkable claims as a JSON array.",
+                }
+            ],
+        )
+
+        raw_text = "".join(
+            block.text for block in response.content if block.type == "text"
+        )
+
+        try:
+            claims = _safe_json_parse(raw_text)
+        except (json.JSONDecodeError, AttributeError):
+            claims = []
+
+        if isinstance(claims, list):
+            all_claims.extend(claims)
+
+    # De-duplicate near-identical claims (same normalized text)
+    seen = set()
+    unique_claims = []
+    for c in all_claims:
+        key = c.get("claim", "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique_claims.append(c)
+
+    return unique_claims

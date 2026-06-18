@@ -1,0 +1,128 @@
+"""
+web_verifier.py
+For each extracted claim: searches the live web for current information,
+then asks Claude to compare the claim against the search results and
+issue a verdict: Verified, Inaccurate, or False.
+"""
+
+import json
+import re
+from ddgs import DDGS
+
+VERIFICATION_SYSTEM_PROMPT = """You are a strict fact-checker. You will be given:
+1. A CLAIM extracted from a document.
+2. LIVE WEB SEARCH RESULTS gathered just now.
+
+Decide the verdict using only the search results as evidence (plus your own
+general knowledge only to interpret the results, never to override them
+when they conflict with you).
+
+Verdicts:
+- "Verified": the search results confirm the claim's figures/facts are
+  current and accurate (small rounding differences are fine).
+- "Inaccurate": the claim is in the right ballpark / was once true, but is
+  outdated, superseded, or off (e.g. an old statistic, an old version
+  number, a since-changed figure).
+- "False": the search results contradict the claim outright, or no
+  credible evidence for the claim exists at all.
+
+Return ONLY a JSON object, nothing else. No markdown fences, no preamble.
+Keys required:
+- "verdict": one of "Verified", "Inaccurate", "False"
+- "correct_fact": if verdict is "Inaccurate" or "False", state the correct,
+  current fact in one short sentence using the evidence found. If
+  "Verified", repeat the confirmed fact briefly. If truly no evidence
+  either way exists, say "No reliable evidence found."
+- "reasoning": one short sentence explaining the verdict
+- "confidence": "high", "medium", or "low" based on how directly the
+  search results address the claim
+"""
+
+
+def _safe_json_parse(raw: str):
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^```(json)?", "", cleaned).strip()
+    cleaned = re.sub(r"```$", "", cleaned).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+
+def search_web(query: str, max_results: int = 5) -> list[dict]:
+    """
+    Runs a live web search (no API key required) and returns a compact
+    list of {title, body, href} results.
+    """
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        return [
+            {
+                "title": r.get("title", ""),
+                "body": r.get("body", ""),
+                "href": r.get("href", ""),
+            }
+            for r in results
+        ]
+    except Exception as e:
+        return [{"title": "Search error", "body": str(e), "href": ""}]
+
+
+def verify_claim(client, claim: dict, model: str) -> dict:
+    """
+    Searches the web for the claim and asks Claude to issue a verdict.
+
+    Args:
+        client: anthropic.Anthropic client instance.
+        claim: dict with keys "claim", "original_text", "type".
+        model: Claude model id to use.
+
+    Returns:
+        The original claim dict, enriched with "verdict", "correct_fact",
+        "reasoning", "confidence", and "sources".
+    """
+    query = claim.get("claim", "")
+    search_results = search_web(query)
+
+    evidence_block = "\n\n".join(
+        f"Source: {r['title']}\nURL: {r['href']}\nSnippet: {r['body']}"
+        for r in search_results
+    ) or "No search results returned."
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=500,
+        system=VERIFICATION_SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"CLAIM: {claim.get('claim')}\n\n"
+                    f"LIVE WEB SEARCH RESULTS:\n{evidence_block}\n\n"
+                    "Return the JSON verdict object."
+                ),
+            }
+        ],
+    )
+
+    raw_text = "".join(
+        block.text for block in response.content if block.type == "text"
+    )
+
+    try:
+        verdict_data = _safe_json_parse(raw_text)
+    except (json.JSONDecodeError, AttributeError):
+        verdict_data = {
+            "verdict": "False",
+            "correct_fact": "No reliable evidence found.",
+            "reasoning": "Could not parse verification response.",
+            "confidence": "low",
+        }
+
+    enriched = {**claim, **verdict_data}
+    enriched["sources"] = [r for r in search_results if r.get("href")]
+    return enriched

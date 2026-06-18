@@ -1,0 +1,222 @@
+"""
+app.py
+The Fact-Check Agent — a Streamlit web app that reads a PDF, extracts
+checkable claims, verifies each one against live web search results,
+and reports a verdict: Verified, Inaccurate, or False.
+"""
+
+import os
+import json
+import time
+import streamlit as st
+from anthropic import Anthropic
+
+from pdf_utils import extract_text_from_pdf
+from claim_extractor import extract_claims
+from web_verifier import verify_claim
+
+# --------------------------------------------------------------------------
+# Page setup
+# --------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Fact-Check Agent",
+    page_icon="🔎",
+    layout="wide",
+)
+
+CUSTOM_CSS = """
+<style>
+.verdict-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+}
+.badge-verified { background-color: #16a34a22; color: #15803d; border: 1px solid #15803d55; }
+.badge-inaccurate { background-color: #f59e0b22; color: #b45309; border: 1px solid #b4530955; }
+.badge-false { background-color: #dc262622; color: #b91c1c; border: 1px solid #b91c1c55; }
+.claim-card {
+    border: 1px solid #2a2a2a22;
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 14px;
+}
+.claim-text { font-size: 1.02rem; font-weight: 600; margin-bottom: 6px; }
+.muted { color: #6b7280; font-size: 0.88rem; }
+.source-link { font-size: 0.82rem; }
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+# --------------------------------------------------------------------------
+# Sidebar — configuration
+# --------------------------------------------------------------------------
+st.sidebar.title("🔎 Fact-Check Agent")
+st.sidebar.markdown(
+    "Reads a PDF, extracts checkable claims, and verifies each one "
+    "against live web search results."
+)
+
+default_key = os.environ.get("ANTHROPIC_API_KEY", "")
+try:
+    default_key = st.secrets.get("ANTHROPIC_API_KEY", default_key)
+except Exception:
+    pass
+
+api_key = st.sidebar.text_input(
+    "Anthropic API key",
+    value=default_key,
+    type="password",
+    help="Stored only for this session. Set ANTHROPIC_API_KEY as an env "
+    "var or Streamlit secret to avoid entering it every time.",
+)
+
+model = st.sidebar.selectbox(
+    "Model",
+    options=["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001"],
+    index=0,
+    help="Sonnet is the recommended balance of cost and quality for this task.",
+)
+
+max_claims = st.sidebar.slider(
+    "Max claims to verify",
+    min_value=3,
+    max_value=30,
+    value=12,
+    help="Caps API + search calls. Lower this if you're on a free tier / "
+    "tight on credits.",
+)
+
+st.sidebar.markdown("---")
+st.sidebar.caption(
+    "Web search runs via DuckDuckGo and needs no extra API key. "
+    "Claim extraction and verdicts run via the Anthropic API."
+)
+
+# --------------------------------------------------------------------------
+# Main area
+# --------------------------------------------------------------------------
+st.title("The Fact-Check Agent")
+st.markdown(
+    "Upload a PDF. The agent extracts specific, checkable claims "
+    "(stats, dates, financial and technical figures), searches the live "
+    "web for each one, and flags it as **Verified**, **Inaccurate**, or **False**."
+)
+
+uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
+
+run_clicked = st.button("Run Fact-Check", type="primary", disabled=uploaded_file is None)
+
+if "results" not in st.session_state:
+    st.session_state.results = None
+
+VERDICT_BADGE = {
+    "Verified": '<span class="verdict-badge badge-verified">✅ Verified</span>',
+    "Inaccurate": '<span class="verdict-badge badge-inaccurate">⚠️ Inaccurate</span>',
+    "False": '<span class="verdict-badge badge-false">❌ False</span>',
+}
+
+
+def render_results(results: list[dict]):
+    verified = sum(1 for r in results if r.get("verdict") == "Verified")
+    inaccurate = sum(1 for r in results if r.get("verdict") == "Inaccurate")
+    false_count = sum(1 for r in results if r.get("verdict") == "False")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Claims checked", len(results))
+    c2.metric("Verified", verified)
+    c3.metric("Inaccurate", inaccurate)
+    c4.metric("False", false_count)
+
+    st.markdown("### Claim-by-claim report")
+
+    for r in results:
+        badge = VERDICT_BADGE.get(r.get("verdict"), r.get("verdict", "Unknown"))
+        sources_html = ""
+        for s in r.get("sources", [])[:3]:
+            if s.get("href"):
+                sources_html += f'<div class="source-link">🔗 <a href="{s["href"]}" target="_blank">{s.get("title", s["href"])}</a></div>'
+
+        st.markdown(
+            f"""
+            <div class="claim-card">
+                <div class="claim-text">{r.get('claim')}</div>
+                {badge}
+                <div style="margin-top:8px;"><b>Real fact:</b> {r.get('correct_fact', '—')}</div>
+                <div class="muted" style="margin-top:4px;">{r.get('reasoning', '')}</div>
+                <div class="muted" style="margin-top:6px;">Source text: "{r.get('original_text', '')}"</div>
+                {sources_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Downloadable report
+    report_json = json.dumps(results, indent=2)
+    st.download_button(
+        "Download full report (JSON)",
+        data=report_json,
+        file_name="factcheck_report.json",
+        mime="application/json",
+    )
+
+
+if run_clicked and uploaded_file is not None:
+    if not api_key:
+        st.error("Please enter your Anthropic API key in the sidebar.")
+    else:
+        client = Anthropic(api_key=api_key)
+
+        with st.spinner("Reading PDF..."):
+            file_bytes = uploaded_file.read()
+            text = extract_text_from_pdf(file_bytes)
+
+        if not text.strip():
+            st.error(
+                "Couldn't extract any text from this PDF. If it's a scanned "
+                "image-only PDF, OCR isn't supported in this version."
+            )
+        else:
+            with st.spinner("Extracting checkable claims..."):
+                try:
+                    claims = extract_claims(client, text, model)
+                except Exception as e:
+                    st.error(f"Claim extraction failed: {e}")
+                    claims = []
+
+            claims = claims[:max_claims]
+
+            if not claims:
+                st.warning("No checkable claims (stats, dates, figures) were found in this document.")
+            else:
+                st.success(f"Found {len(claims)} checkable claim(s). Verifying against the live web...")
+                progress = st.progress(0.0)
+                status = st.empty()
+                results = []
+
+                for i, claim in enumerate(claims):
+                    status.markdown(f"Checking claim {i + 1} of {len(claims)}: *{claim.get('claim')}*")
+                    try:
+                        verified_claim = verify_claim(client, claim, model)
+                    except Exception as e:
+                        verified_claim = {
+                            **claim,
+                            "verdict": "False",
+                            "correct_fact": "Could not verify due to an error.",
+                            "reasoning": str(e),
+                            "sources": [],
+                        }
+                    results.append(verified_claim)
+                    progress.progress((i + 1) / len(claims))
+                    time.sleep(0.1)
+
+                status.empty()
+                progress.empty()
+                st.session_state.results = results
+
+if st.session_state.results:
+    render_results(st.session_state.results)
+elif uploaded_file is None:
+    st.info("Upload a PDF and click **Run Fact-Check** to get started.")
