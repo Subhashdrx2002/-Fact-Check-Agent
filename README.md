@@ -1,5 +1,5 @@
 # The Fact-Check Agent
-![Project Image](![Project Image](https://github.com/username/repo/blob/main/image.png))
+![Project Image](![Project Image](https://drive.google.com/file/d/1yrSxzbTZ6X12Me0gZQQWk6M_vh7gHr5A/view?usp=drive_link))
 
 A web app that reads a PDF, extracts specific checkable claims (statistics,
 dates, financial and technical figures), searches the live web for each
