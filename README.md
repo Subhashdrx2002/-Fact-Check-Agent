@@ -1,4 +1,5 @@
 # The Fact-Check Agent
+Emergent-Fullstack-App.png
 
 A web app that reads a PDF, extracts specific checkable claims (statistics,
 dates, financial and technical figures), searches the live web for each
